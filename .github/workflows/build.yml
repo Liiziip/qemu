@@ -52,35 +52,23 @@ jobs:
 
     - name: 'Install ARM64 cross-compilation toolchain'
       run: |
-        # 安装 ARM64 交叉编译工具链
-        pacman -S --noconfirm --needed mingw-w64-cross-toolchain
+        # 安装 ARM64 交叉编译器（明确指定包名）
+        pacman -S --noconfirm --needed \
+          mingw-w64-cross-mingwarm64-binutils \
+          mingw-w64-cross-mingwarm64-crt \
+          mingw-w64-cross-mingwarm64-gcc \
+          mingw-w64-cross-mingwarm64-headers \
+          mingw-w64-cross-mingwarm64-winpthreads
         
-        # 查找交叉编译器位置
-        echo "Searching for ARM64 cross compiler..."
-        find /mingw64 -name "aarch64-w64-mingw32-gcc*" 2>/dev/null || true
-        find /usr -name "aarch64-w64-mingw32-gcc*" 2>/dev/null || true
+        # 验证安装
+        echo "Checking installation..."
+        ls -la /mingw64/bin/aarch64* 2>/dev/null || echo "Not in /mingw64/bin"
+        ls -la /opt/bin/aarch64* 2>/dev/null || echo "Not in /opt/bin"
         
-        # 检查交叉编译器是否可用
-        if command -v aarch64-w64-mingw32-gcc &> /dev/null; then
-          echo "ARM64 cross compiler found in PATH"
-          aarch64-w64-mingw32-gcc --version
-        else
-          echo "ARM64 cross compiler not in PATH, searching..."
-          # 尝试找到并添加路径
-          CROSS_GCC=$(find / -name "aarch64-w64-mingw32-gcc" 2>/dev/null | head -n 1)
-          if [ -n "$CROSS_GCC" ]; then
-            CROSS_DIR=$(dirname "$CROSS_GCC")
-            echo "Found at: $CROSS_DIR"
-            export PATH="$CROSS_DIR:$PATH"
-            echo "$CROSS_DIR" >> $GITHUB_PATH
-          else
-            echo "ERROR: ARM64 cross compiler not found!"
-            # 尝试其他包名
-            pacman -Ss mingw-w64 | grep -i aarch64 || true
-            pacman -Ss mingw-w64 | grep -i arm64 || true
-            exit 1
-          fi
-        fi
+        # 直接测试编译器
+        /mingw64/bin/aarch64-w64-mingw32-gcc --version 2>/dev/null || \
+        /opt/bin/aarch64-w64-mingw32-gcc --version 2>/dev/null || \
+        echo "Compiler not found in expected locations"
         
         # 创建交叉编译目录结构
         mkdir -p /mingw64/aarch64-w64-mingw32/lib
@@ -89,73 +77,54 @@ jobs:
 
     - name: 'Build zlib for ARM64'
       run: |
-        # 确保交叉编译器在 PATH 中
-        if ! command -v aarch64-w64-mingw32-gcc &> /dev/null; then
-          CROSS_GCC=$(find / -name "aarch64-w64-mingw32-gcc" 2>/dev/null | head -n 1)
-          if [ -n "$CROSS_GCC" ]; then
-            CROSS_DIR=$(dirname "$CROSS_GCC")
-            export PATH="$CROSS_DIR:$PATH"
-          else
-            echo "ERROR: ARM64 cross compiler still not found!"
-            exit 1
-          fi
-        fi
+        # 设置交叉编译器路径
+        export PATH="/mingw64/bin:$PATH"
         
-        echo "Using cross compiler: $(which aarch64-w64-mingw32-gcc)"
-        aarch64-w64-mingw32-gcc --version
+        # 验证编译器
+        which aarch64-w64-mingw32-gcc || echo "Compiler not in PATH"
+        aarch64-w64-mingw32-gcc --version || echo "Cannot execute compiler"
         
         cd /tmp
-        
-        # 清理旧目录
         rm -rf zlib
-        
-        # 使用 GitHub 上的 zlib 源码
         git clone --depth 1 https://github.com/madler/zlib.git
         cd zlib
         
-        # 直接使用 Makefile 交叉编译 zlib
+        # 编译 zlib
         make -f win32/Makefile.gcc \
           PREFIX=aarch64-w64-mingw32- \
           SHARED_MODE=1 \
-          -j$(nproc)
+          -j$(nproc) || {
+            echo "zlib compilation failed, trying alternative..."
+            # 尝试使用 configure
+            CC=aarch64-w64-mingw32-gcc ./configure --prefix=/mingw64/aarch64-w64-mingw32
+            make -j$(nproc)
+            make install
+          }
         
-        # 手动安装
-        mkdir -p /mingw64/aarch64-w64-mingw32/include
-        mkdir -p /mingw64/aarch64-w64-mingw32/lib
-        mkdir -p /mingw64/aarch64-w64-mingw32/bin
-        
-        cp zlib.h zconf.h /mingw64/aarch64-w64-mingw32/include/
-        cp libz.dll.a /mingw64/aarch64-w64-mingw32/lib/
-        cp zlib1.dll /mingw64/aarch64-w64-mingw32/bin/
-        
-        echo "zlib installed successfully"
-        ls -la /mingw64/aarch64-w64-mingw32/lib/
+        # 手动安装（如果 Makefile 方法成功）
+        if [ -f "libz.dll.a" ]; then
+          mkdir -p /mingw64/aarch64-w64-mingw32/include
+          mkdir -p /mingw64/aarch64-w64-mingw32/lib
+          mkdir -p /mingw64/aarch64-w64-mingw32/bin
+          cp zlib.h zconf.h /mingw64/aarch64-w64-mingw32/include/
+          cp libz.dll.a /mingw64/aarch64-w64-mingw32/lib/
+          cp zlib1.dll /mingw64/aarch64-w64-mingw32/bin/
+          echo "zlib installed successfully"
+        fi
 
     - name: '🚧 Build QEMU Windows ARM64 (arm & aarch64) ${{ matrix.mode }}'
       env:
         arg: ${{ matrix.mode == 'dynamic' && '--target-list=arm-softmmu,aarch64-softmmu' || '--target-list=arm-softmmu,aarch64-softmmu --static' }}
       run: |
-          # 确保交叉编译器在 PATH 中
-          if ! command -v aarch64-w64-mingw32-gcc &> /dev/null; then
-            CROSS_GCC=$(find / -name "aarch64-w64-mingw32-gcc" 2>/dev/null | head -n 1)
-            if [ -n "$CROSS_GCC" ]; then
-              CROSS_DIR=$(dirname "$CROSS_GCC")
-              export PATH="$CROSS_DIR:$PATH"
-            fi
-          fi
-          
+          export PATH="/mingw64/bin:$PATH"
           CROSS_PREFIX="aarch64-w64-mingw32-"
-          
-          # 设置环境变量
-          export PKG_CONFIG_PATH="/mingw64/aarch64-w64-mingw32/lib/pkgconfig:/mingw64/lib/pkgconfig"
-          export PKG_CONFIG_SYSROOT_DIR="/mingw64/aarch64-w64-mingw32"
-          export PATH="/mingw64/bin:/mingw64/aarch64-w64-mingw32/bin:$PATH"
           
           echo "ARM64 cross-compilation configuration:"
           echo "CROSS_PREFIX: $CROSS_PREFIX"
-          echo "Cross compiler: $(which aarch64-w64-mingw32-gcc)"
+          which aarch64-w64-mingw32-gcc
+          aarch64-w64-mingw32-gcc --version
           
-          # 最小化配置，禁用所有可选功能
+          # 最小化配置
           MINIMAL_ARGS="--target-list=arm-softmmu,aarch64-softmmu \
             --disable-gtk \
             --disable-spice \
@@ -181,8 +150,6 @@ jobs:
           if [[ "${{ matrix.mode }}" == "static" ]]; then
             MINIMAL_ARGS="$MINIMAL_ARGS --static"
           fi
-          
-          echo "Configure arguments: $MINIMAL_ARGS"
           
           ./configure $MINIMAL_ARGS --cross-prefix=$CROSS_PREFIX
           make -j16
