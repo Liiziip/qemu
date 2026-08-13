@@ -49,100 +49,55 @@ jobs:
           mingw-w64-x86_64-libffi
           mingw-w64-x86_64-pcre2
           mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-llvm
+          mingw-w64-x86_64-clang
+          mingw-w64-x86_64-lld
 
-    - name: 'Install ARM64 cross-compilation toolchain'
+    - name: 'Setup LLVM for ARM64 cross-compilation'
       run: |
-        # 列出所有可用的 ARM64 相关包
-        echo "Available ARM64 packages:"
-        pacman -Ss aarch64 2>/dev/null | head -20 || true
-        echo "---"
-        pacman -Ss mingw-w64-cross 2>/dev/null | head -30 || true
+        # 验证 LLVM/Clang 安装
+        echo "Checking LLVM/Clang installation..."
+        clang --version
+        llvm-ar --version 2>/dev/null || echo "llvm-ar not found"
         
-        # 尝试安装 ARM64 交叉编译器（使用正确的包名）
-        pacman -S --noconfirm --needed \
-          mingw-w64-cross-binutils \
-          mingw-w64-cross-gcc \
-          mingw-w64-cross-headers \
-          mingw-w64-cross-crt \
-          mingw-w64-cross-winpthreads \
-          mingw-w64-cross-windows-default-manifest \
-          mingw-w64-cross-tools \
-          mingw-w64-cross-winpthreads \
-          mingw-w64-cross-zlib 2>/dev/null || {
-            echo "Standard packages failed, trying alternative names..."
-            pacman -S --noconfirm --needed \
-              mingw-w64-cross-mingwarm64-binutils \
-              mingw-w64-cross-mingwarm64-gcc \
-              mingw-w64-cross-mingwarm64-headers \
-              mingw-w64-cross-mingwarm64-crt \
-              mingw-w64-cross-mingwarm64-winpthreads \
-              mingw-w64-cross-mingwarm64-tools \
-              mingw-w64-cross-mingwarm64-zlib 2>/dev/null || true
-          }
-        
-        # 搜索交叉编译器
-        echo "Searching for cross compiler..."
-        find /mingw64 /opt /usr -name "*aarch64*" -o -name "*arm64*" 2>/dev/null | head -20
-        
-        # 检查是否安装成功
-        if [ -f "/mingw64/bin/aarch64-w64-mingw32-gcc" ]; then
-          echo "Found ARM64 cross compiler"
-          /mingw64/bin/aarch64-w64-mingw32-gcc --version
-        elif command -v aarch64-w64-mingw32-gcc; then
-          echo "Found in PATH"
-          aarch64-w64-mingw32-gcc --version
-        else
-          echo "ARM64 cross compiler not found, trying manual installation..."
-          
-          # 手动下载并安装 ARM64 交叉编译器
-          cd /tmp
-          curl -L -o mingw-arm64.zip https://github.com/niXman/mingw-builds-binaries/releases/download/13.2.0-rt_v11-rev1/x86_64-13.2.0-release-posix-seh-msvcrt-rt_v11-rev1.7z 2>/dev/null || \
-          curl -L -o mingw-arm64.zip https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-msvcrt-ubuntu-20.04-x86_64.tar.xz 2>/dev/null || \
-          echo "Failed to download cross compiler"
-        fi
+        # 检查 ARM64 目标支持
+        echo "ARM64 targets:"
+        llvm-objdump --version 2>/dev/null | grep -i aarch64 || echo "aarch64 support might need llvm-targets"
         
         # 创建交叉编译目录结构
         mkdir -p /mingw64/aarch64-w64-mingw32/lib
         mkdir -p /mingw64/aarch64-w64-mingw32/include
         mkdir -p /mingw64/aarch64-w64-mingw32/bin
+        
+        # 创建 pkg-config 包装器
+        cat > /usr/local/bin/aarch64-w64-mingw32-pkg-config << 'EOF'
+#!/bin/bash
+PKG_CONFIG_PATH="/mingw64/aarch64-w64-mingw32/lib/pkgconfig:/mingw64/lib/pkgconfig" \
+PKG_CONFIG_SYSROOT_DIR="/mingw64/aarch64-w64-mingw32" \
+pkg-config "$@"
+EOF
+        chmod +x /usr/local/bin/aarch64-w64-mingw32-pkg-config
 
-    - name: 'Build zlib for ARM64'
+    - name: 'Build minimal dependencies for ARM64'
       run: |
-        export PATH="/mingw64/bin:$PATH"
-        
-        # 检查编译器
-        COMPILER=""
-        if command -v aarch64-w64-mingw32-gcc &> /dev/null; then
-          COMPILER="aarch64-w64-mingw32-gcc"
-        elif command -v clang &> /dev/null && clang --version | grep -q "aarch64"; then
-          COMPILER="clang"
-        else
-          echo "No ARM64 compiler found"
-          exit 1
-        fi
-        
-        echo "Using compiler: $COMPILER"
-        
+        # 使用 clang 交叉编译 zlib
         cd /tmp
         rm -rf zlib
         git clone --depth 1 https://github.com/madler/zlib.git
         cd zlib
         
-        # 使用找到的编译器编译 zlib
-        if [[ "$COMPILER" == "aarch64-w64-mingw32-gcc" ]]; then
-          make -f win32/Makefile.gcc PREFIX=aarch64-w64-mingw32- SHARED_MODE=1 -j$(nproc)
-        else
-          CC="clang --target=aarch64-w64-mingw32" ./configure --prefix=/mingw64/aarch64-w64-mingw32
-          make -j$(nproc)
-          make install
-          exit 0
-        fi
+        # 使用 clang 交叉编译到 ARM64 Windows
+        export CC="clang --target=aarch64-w64-windows-gnu"
+        export AR="llvm-ar"
+        export RANLIB="llvm-ranlib"
         
-        # 安装
-        mkdir -p /mingw64/aarch64-w64-mingw32/{include,lib,bin}
-        cp zlib.h zconf.h /mingw64/aarch64-w64-mingw32/include/
-        cp libz.dll.a /mingw64/aarch64-w64-mingw32/lib/ 2>/dev/null || true
-        cp zlib1.dll /mingw64/aarch64-w64-mingw32/bin/ 2>/dev/null || true
+        # 配置和编译
+        ./configure --prefix=/mingw64/aarch64-w64-mingw32 --static
+        make -j$(nproc)
+        make install
+        
+        echo "zlib built successfully for ARM64"
+        ls -la /mingw64/aarch64-w64-mingw32/lib/ 2>/dev/null || echo "lib directory not created"
 
     - name: '🚧 Build QEMU Windows ARM64 (arm & aarch64) ${{ matrix.mode }}'
       env:
@@ -150,181 +105,62 @@ jobs:
       run: |
           export PATH="/mingw64/bin:$PATH"
           
-          # 确定交叉编译器前缀
-          if command -v aarch64-w64-mingw32-gcc &> /dev/null; then
-            CROSS_PREFIX="aarch64-w64-mingw32-"
-          elif command -v clang &> /dev/null; then
-            CROSS_PREFIX="clang --target=aarch64-w64-mingw32 "
+          # 设置 LLVM/Clang 交叉编译环境
+          export CC="clang --target=aarch64-w64-windows-gnu"
+          export CXX="clang++ --target=aarch64-w64-windows-gnu"
+          export AR="llvm-ar"
+          export RANLIB="llvm-ranlib"
+          export NM="llvm-nm"
+          export STRIP="llvm-strip"
+          export OBJCOPY="llvm-objcopy"
+          export OBJDUMP="llvm-objdump"
+          export LD="lld-link"
+          export PKG_CONFIG_PATH="/mingw64/aarch64-w64-mingw32/lib/pkgconfig:/mingw64/lib/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="/mingw64/aarch64-w64-mingw32"
+          
+          echo "ARM64 cross-compilation with LLVM/Clang:"
+          echo "CC: $CC"
+          echo "AR: $AR"
+          
+          # 最小化配置
+          MINIMAL_ARGS="--target-list=arm-softmmu,aarch64-softmmu \
+            --disable-gtk \
+            --disable-spice \
+            --disable-usb-redir \
+            --disable-smartcard \
+            --disable-gnutls \
+            --disable-vnc-sasl \
+            --disable-libssh \
+            --disable-sdl \
+            --disable-fdt \
+            --disable-capstone \
+            --disable-libnfs \
+            --disable-snappy \
+            --disable-libusb \
+            --disable-lzo \
+            --disable-zstd \
+            --disable-curl \
+            --disable-libslirp \
+            --disable-guest-agent \
+            --disable-docs \
+            --disable-tools \
+            --disable-werror"
+          
+          if [[ "${{ matrix.mode }}" == "static" ]]; then
+            MINIMAL_ARGS="$MINIMAL_ARGS --static"
           else
-            echo "No ARM64 compiler found"
-            exit 1
+            # 对于动态构建，避免静态链接
+            MINIMAL_ARGS="$MINIMAL_ARGS --disable-static"
           fi
           
-          echo "Using cross prefix: $CROSS_PREFIX"
+          echo "Configure arguments: $MINIMAL_ARGS"
           
-          # 最小化配置
-          MINIMAL_ARGS="--target-list=arm-softmmu,aarch64-softmmu \
-            --disable-gtk \
-            --disable-spice \
-            --disable-usb-redir \
-            --disable-smartcard \
-            --disable-gnutls \
-            --disable-vnc-sasl \
-            --disable-libssh \
-            --disable-sdl \
-            --disable-fdt \
-            --disable-capstone \
-            --disable-libnfs \
-            --disable-snappy \
-            --disable-libusb \
-            --disable-lzo \
-            --disable-zstd \
-            --disable-curl \
-            --disable-libslirp \
-            --disable-guest-agent \
-            --disable-docs \
-            --disable-tools"
-          
-          if [[ "${{ matrix.mode }}" == "static" ]]; then
-            MINIMAL_ARGS="$MINIMAL_ARGS --static"
-          fi
-          
-          ./configure $MINIMAL_ARGS --cross-prefix="$CROSS_PREFIX"
-          make -j16
-
-    - name: Prepare Artifacts
-      shell: cmd
-      run: |
-          md ${{ github.workspace }}\artifacts
-          cd ${{ github.workspace }}\artifacts
-          move D:\a\qemu\qemu\build\*.exe
-          move D:\a\qemu\qemu\build\pc-bios share
-          robocopy D:\a\qemu\qemu\pc-bios share /xn /xo /mov
-          del share\*.bz2
-
-    - name: Prepare Artifacts (dynamic only)
-      shell: cmd
-      if: ${{ matrix.mode == 'dynamic' }}
-      run: |
-          cd ${{ github.workspace }}\artifacts
-           diffutils
-          flex
-          grep
-          sed
-          base-devel
-          python
-          python-setuptools
-          mingw-w64-x86_64-toolchain
-          mingw-w64-x86_64-pkgconf
-          mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-python
-          mingw-w64-x86_64-zlib
-          mingw-w64-x86_64-libffi
-          mingw-w64-x86_64-pcre2
-          mingw-w64-x86_64-cmake
-
-    - name: 'Install ARM64 cross-compilation toolchain'
-      run: |
-        # 安装 ARM64 交叉编译器（明确指定包名）
-        pacman -S --noconfirm --needed \
-          mingw-w64-cross-mingwarm64-binutils \
-          mingw-w64-cross-mingwarm64-crt \
-          mingw-w64-cross-mingwarm64-gcc \
-          mingw-w64-cross-mingwarm64-headers \
-          mingw-w64-cross-mingwarm64-winpthreads
-        
-        # 验证安装
-        echo "Checking installation..."
-        ls -la /mingw64/bin/aarch64* 2>/dev/null || echo "Not in /mingw64/bin"
-        ls -la /opt/bin/aarch64* 2>/dev/null || echo "Not in /opt/bin"
-        
-        # 直接测试编译器
-        /mingw64/bin/aarch64-w64-mingw32-gcc --version 2>/dev/null || \
-        /opt/bin/aarch64-w64-mingw32-gcc --version 2>/dev/null || \
-        echo "Compiler not found in expected locations"
-        
-        # 创建交叉编译目录结构
-        mkdir -p /mingw64/aarch64-w64-mingw32/lib
-        mkdir -p /mingw64/aarch64-w64-mingw32/include
-        mkdir -p /mingw64/aarch64-w64-mingw32/bin
-
-    - name: 'Build zlib for ARM64'
-      run: |
-        # 设置交叉编译器路径
-        export PATH="/mingw64/bin:$PATH"
-        
-        # 验证编译器
-        which aarch64-w64-mingw32-gcc || echo "Compiler not in PATH"
-        aarch64-w64-mingw32-gcc --version || echo "Cannot execute compiler"
-        
-        cd /tmp
-        rm -rf zlib
-        git clone --depth 1 https://github.com/madler/zlib.git
-        cd zlib
-        
-        # 编译 zlib
-        make -f win32/Makefile.gcc \
-          PREFIX=aarch64-w64-mingw32- \
-          SHARED_MODE=1 \
-          -j$(nproc) || {
-            echo "zlib compilation failed, trying alternative..."
-            # 尝试使用 configure
-            CC=aarch64-w64-mingw32-gcc ./configure --prefix=/mingw64/aarch64-w64-mingw32
-            make -j$(nproc)
-            make install
+          # 尝试配置
+          ./configure $MINIMAL_ARGS || {
+            echo "Standard configure failed, trying with explicit cross-prefix..."
+            ./configure $MINIMAL_ARGS --cross-prefix="clang --target=aarch64-w64-windows-gnu "
           }
-        
-        # 手动安装（如果 Makefile 方法成功）
-        if [ -f "libz.dll.a" ]; then
-          mkdir -p /mingw64/aarch64-w64-mingw32/include
-          mkdir -p /mingw64/aarch64-w64-mingw32/lib
-          mkdir -p /mingw64/aarch64-w64-mingw32/bin
-          cp zlib.h zconf.h /mingw64/aarch64-w64-mingw32/include/
-          cp libz.dll.a /mingw64/aarch64-w64-mingw32/lib/
-          cp zlib1.dll /mingw64/aarch64-w64-mingw32/bin/
-          echo "zlib installed successfully"
-        fi
-
-    - name: '🚧 Build QEMU Windows ARM64 (arm & aarch64) ${{ matrix.mode }}'
-      env:
-        arg: ${{ matrix.mode == 'dynamic' && '--target-list=arm-softmmu,aarch64-softmmu' || '--target-list=arm-softmmu,aarch64-softmmu --static' }}
-      run: |
-          export PATH="/mingw64/bin:$PATH"
-          CROSS_PREFIX="aarch64-w64-mingw32-"
           
-          echo "ARM64 cross-compilation configuration:"
-          echo "CROSS_PREFIX: $CROSS_PREFIX"
-          which aarch64-w64-mingw32-gcc
-          aarch64-w64-mingw32-gcc --version
-          
-          # 最小化配置
-          MINIMAL_ARGS="--target-list=arm-softmmu,aarch64-softmmu \
-            --disable-gtk \
-            --disable-spice \
-            --disable-usb-redir \
-            --disable-smartcard \
-            --disable-gnutls \
-            --disable-vnc-sasl \
-            --disable-libssh \
-            --disable-sdl \
-            --disable-fdt \
-            --disable-capstone \
-            --disable-libnfs \
-            --disable-snappy \
-            --disable-libusb \
-            --disable-lzo \
-            --disable-zstd \
-            --disable-curl \
-            --disable-libslirp \
-            --disable-guest-agent \
-            --disable-docs \
-            --disable-tools"
-          
-          if [[ "${{ matrix.mode }}" == "static" ]]; then
-            MINIMAL_ARGS="$MINIMAL_ARGS --static"
-          fi
-          
-          ./configure $MINIMAL_ARGS --cross-prefix=$CROSS_PREFIX
           make -j16
 
     - name: Prepare Artifacts
