@@ -13,10 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { icon: '🟦', sys: mingw64, mode: dynamic }
-          - { icon: '🟦', sys: mingw64, mode: static }
+          - { icon: '🟪', sys: clangarm64, arch: aarch64, mode: dynamic }
+          - { icon: '🟪', sys: clangarm64, arch: aarch64, mode: static }
 
-    name: 🚧${{ matrix.icon }} ${{ matrix.sys }} Build ${{ matrix.mode }}
+    name: 🚧${{ matrix.icon }} ${{ matrix.arch }} Build ${{ matrix.mode }}
     defaults:
       run:
         shell: msys2 {0}
@@ -85,7 +85,17 @@ jobs:
       env:
         arg: ${{ matrix.mode == 'dynamic' && '--enable-gtk --enable-sdl --enable-fdt=system --enable-avx2 --target-list=arm-softmmu,aarch64-softmmu' || '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-vnc-sasl --disable-libssh --enable-sdl --enable-fdt=system --enable-avx2 --target-list=arm-softmmu,aarch64-softmmu --static --extra-cflags="-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD"' }}
       run: |
-          ./configure ${{ env.arg }}
+          # 对于 ARM64，禁用 AVX2 并调整配置
+          if [[ "${{ matrix.arch }}" == "aarch64" ]]; then
+            ARG="${{ env.arg }}"
+            # 移除 --enable-avx2（ARM64 不支持 AVX2）
+            ARG="${ARG/--enable-avx2/}"
+            # ARM64 上可能不需要 GTK，可以选择禁用
+            # ARG="${ARG/--enable-gtk/--disable-gtk}"
+            ./configure $ARG
+          else
+            ./configure ${{ env.arg }}
+          fi
           make -j16
 
     - name: Prepare Artifacts
@@ -103,7 +113,11 @@ jobs:
       if: ${{ matrix.mode == 'dynamic' }}
       run: |
           cd ${{ github.workspace }}\artifacts
-          copy D:\a\_temp\msys64\mingw64\bin\*.dll
+          if [[ "${{ matrix.arch }}" == "aarch64" ]]; then
+            copy D:\a\_temp\msys64\clangarm64\bin\*.dll
+          else
+            copy D:\a\_temp\msys64\mingw64\bin\*.dll
+          fi
           md lib\gdk-pixbuf-2.0\2.10.0
           fsutil file createNew lib\gdk-pixbuf-2.0\2.10.0\loaders.cache 0
           move D:\a\qemu\qemu\build\po share\locale
@@ -111,7 +125,7 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@main
       with:
-        name: QEMU (${{ matrix.mode }} build)
+        name: QEMU Windows ${{ matrix.arch }} (${{ matrix.mode }} build)
         path: ${{ github.workspace }}/artifacts
         compression-level: 9
 
